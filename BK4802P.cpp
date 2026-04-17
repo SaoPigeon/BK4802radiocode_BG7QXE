@@ -1,14 +1,15 @@
 // BK4802P 驱动程序 自主设计 编写者：SG  归属：CLG队伍
 // 此驱动程序是根据 BK4802P 的数据手册编写，因开源作者删库跑路，无奈只得自己写库
 // 起编日期：2026年3月24日
+// 修改日期：2026年4月16日 修改内容：频率计算改为kHz整数运算，避免浮点误差
 
 #include "BK4802P.h"
 #include <Wire.h>
 
 // 芯片通讯地址与晶振、中频参数（类内部使用）
 static const uint8_t BK4802P_ADDR = 0x48;       // I2C 地址
-static const double XTAL_FREQ_MHZ = 21.25;      // 晶振频率 (MHz)
-static const double IF_FREQ_MHZ = 0.137;        // 中频频率 (MHz)
+static const double XTAL_KHZ = 21250;      // 晶振频率 (kHz)
+static const double IF_KHZ = 137;        // 中频频率 (kHz)
 
 // 构造函数（无需操作，Wire.begin 需由用户自行调用）
 BK4802P::BK4802P() {
@@ -38,13 +39,13 @@ uint16_t BK4802P::readRegister(uint8_t regAddr) {
 
 // 初始化寄存器
 void BK4802P::RegistersInit() {
-    writeRegister(23, 0xACD0);  // 第一步初始化，先写 23 号寄存器！
+    writeRegister(23, 0x1CE0);  // 第一步初始化，先写 23 号寄存器！
     // 这里原参考代码是 A8D0，我已修改寄存器 Reg23<10> 为 1，收发完全由寄存器控制
 
     // 初始化寄存器数组（参照参考代码并基于数据手册修改，后续可改）
     const uint16_t initreg[] = {
         0x0300,    // 收发模式寄存器，此处为接收
-        0x8E04,    // 晶振，采样 ADC 寄存器
+        0x0C04,    // 晶振，采样 ADC 寄存器
         0xF140,    // 收发音频设置寄存器
         0xED00,    // 接收中频增益（B15~13）
         0x17E0,    // 功放功率，ASK 开关（关），低电流模式（关）
@@ -71,47 +72,55 @@ void BK4802P::RegistersInit() {
 }
 
 // 设置频率函数 // BK4802 支持的频率段有：24-32；35-46；43-57；128-170；384-512（MHz）
-void BK4802P::BK4802FreqSet(double freq_mhz, bool isTX) {
-    // 1. 根据频段确定 Ndiv 和 div_code
+// 频率设置函数，freq_khz 单位为 kHz
+void BK4802P::BK4802FreqSet(uint32_t freq_khz, bool isTX) {
+    // 1. 根据频段确定 ndiv 和 div_code（阈值单位：kHz）
     uint8_t ndiv, div_code;
-    if (freq_mhz >= 384 && freq_mhz <= 512) {
+    if (freq_khz >= 384000UL && freq_khz <= 512000UL) {
         ndiv = 4;      // Band1
         div_code = 0;
-    } else if (freq_mhz >= 128 && freq_mhz <= 170) {
+    } else if (freq_khz >= 128000UL && freq_khz <= 170000UL) {
         ndiv = 12;     // Band2
         div_code = 1;
-    } else if (freq_mhz >= 43 && freq_mhz <= 57) {
+    } else if (freq_khz >= 43000UL && freq_khz <= 57000UL) {
         ndiv = 36;     // Band3
         div_code = 4;
-    } else if (freq_mhz >= 35 && freq_mhz <= 46) {
-        ndiv = 44;     // Band4（注意：这一段有问题，因为 35-46 有一段和 43-57 交集）
+    } else if (freq_khz >= 35000UL && freq_khz <= 46000UL) {
+        ndiv = 44;     // Band4
         div_code = 5;
-    } else if (freq_mhz >= 24 && freq_mhz <= 32) {
+    } else if (freq_khz >= 24000UL && freq_khz <= 32000UL) {
         ndiv = 64;     // Band5
         div_code = 6;
     } else {
-        // 超出范围，不做处理
         Serial.println("频率超出4802的支持范围");
         return;
     }
 
-    // 2. 计算 Frac-N
-    double f_effective = freq_mhz;
+    // 2. 有效频率（接收模式需减去中频）
+    uint32_t f_effective_khz = freq_khz;
     if (!isTX) {
-        // 接收模式需减去中频（因为 f_xtal/21.25 = 1）
-        f_effective = freq_mhz - IF_FREQ_MHZ;
+        if (freq_khz < IF_KHZ) {
+            Serial.println("接收频率低于中频，无效");
+            return;
+        }
+        f_effective_khz = freq_khz - IF_KHZ;
     }
-    double frac_n = (f_effective * ndiv * (1UL << 24)) / XTAL_FREQ_MHZ;
-    uint32_t frac_int = (uint32_t)(frac_n + 0.5);
 
-    // 3. 拆分寄存器 0、1
+    // 3. 整数计算 frac_n = (f_effective_khz * ndiv * 2^24) / XTAL_KHZ
+    const uint64_t TWO_POW_24 = 16777216ULL;  // 2^24
+    uint64_t numerator = (uint64_t)f_effective_khz * ndiv * TWO_POW_24;
+    uint64_t denominator = XTAL_KHZ;
+    // 四舍五入：(numerator + denominator/2) / denominator
+    uint32_t frac_int = (uint32_t)((numerator + denominator / 2) / denominator);
+
+    // 4. 拆分寄存器 0、1
     uint16_t reg0 = (frac_int >> 16) & 0xFFFF;
     uint16_t reg1 = frac_int & 0xFFFF;
 
-    // 4. 寄存器 2：高 3 位 = div_code，低 5 位 = 0
+    // 5. 寄存器 2：高 3 位 = div_code，低 5 位 = 0
     uint16_t reg2 = (div_code << 13) & 0xE000;
 
-    // 5. 写入寄存器
+    // 6. 写入寄存器
     writeRegister(0, reg0);
     writeRegister(1, reg1);
     writeRegister(2, reg2);
@@ -120,21 +129,23 @@ void BK4802P::BK4802FreqSet(double freq_mhz, bool isTX) {
 // 接收模式设置函数
 void BK4802P::BK4802RXModeSet() {
     writeRegister(4, 0x0300);   // 收发模式寄存器，此处为接收
-    writeRegister(5, 0x8E04);   // 晶振，采样 ADC 寄存器
+    writeRegister(5, 0x0C04);   // 晶振，采样 ADC 寄存器
     writeRegister(8, 0x1700);   // 功放功率（Reg8<5-7>已置零），ASK 开关（关），低电流模式（关）
     writeRegister(15, 0x07A0);  // 发射限幅设置寄存器
     writeRegister(18, 0xD1D1);  // 开关喇叭延时设置
     writeRegister(22, 0x0340);  // 静噪
+    writeRegister(23, 0x1CE0);  //数字部分工作在接收状态
 }
 
 // 发射模式设置函数
 void BK4802P::BK4802TXModeSet() {
     writeRegister(4, 0x7C00);   // 收发模式寄存器，此处为发射
-    writeRegister(5, 0x0C04);   // 晶振，采样 ADC 寄存器
+    writeRegister(5, 0x0004);   // 晶振，采样 ADC 寄存器
     writeRegister(8, 0x3FE0);   // 功放功率
     writeRegister(15, 0x061F);  // 发射限幅设置寄存器
     writeRegister(18, 0xD1C1);  // 开关喇叭延时设置
     writeRegister(22, 0x0C00);  // 静噪
+    writeRegister(23, 0x1EE0);  //数字部分工作在发射状态
 }
 
 // 发射功率设置函数 功率值 0-7（对应寄存器 Reg8<5-7>）
@@ -234,13 +245,13 @@ void BK4802P::BK4802AutoTailToneSet(bool enable) {
 }
 
 // 启用接收（调用时用这个）
-void BK4802P::RX_BK4802(double freq) {
-    BK4802FreqSet(freq, false);
+void BK4802P::RX_BK4802(uint32_t freq) {
     BK4802RXModeSet();
+    BK4802FreqSet(freq, false);
 }
 
 // 启用发射（调用时用这个）
-void BK4802P::TX_BK4802(double freq) {
-    BK4802FreqSet(freq, true);
+void BK4802P::TX_BK4802(uint32_t freq) {
     BK4802TXModeSet();
+    BK4802FreqSet(freq, true);
 }

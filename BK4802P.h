@@ -16,7 +16,7 @@ public:
     void RegistersInit();
 
     // 频率设置
-    void BK4802FreqSet(double freq_mhz, bool isTX);
+    void BK4802FreqSet(uint32_t freq_khz, bool isTX);
 
     // 收发模式切换
     void BK4802RXModeSet();
@@ -44,8 +44,8 @@ public:
     void BK4802AutoTailToneSet(bool enable);
 
     // 便捷收发函数
-    void RX_BK4802(double freq);
-    void TX_BK4802(double freq);
+    void RX_BK4802(uint32_t freq);
+    void TX_BK4802(uint32_t freq);
 
 private:
     // 底层 I2C 读写（私有）
