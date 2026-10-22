@@ -1,6 +1,8 @@
 // BK4802P 驱动程序 自主设计 编写者：SG  归属：CLG队伍
 // 此驱动程序是根据 BK4802P 的数据手册编写，因开源作者删库跑路，无奈只得自己写库
 // 起编日期：2026年3月24日
+// 修改日期：2026年4月16日 修改内容：频率计算改为kHz整数运算，避免浮点误差（1.1）
+// 修改日期：2026年10月22日 修改内容：增加初始化失败返回，让上层知道芯片寄了（1.2）
 
 #ifndef BK4802P_H
 #define BK4802P_H
@@ -13,7 +15,7 @@ public:
     BK4802P();
 
     // 初始化寄存器
-    void RegistersInit();
+    bool RegistersInit();
 
     // 频率设置
     void BK4802FreqSet(uint32_t freq_khz, bool isTX);
@@ -49,7 +51,7 @@ public:
 
 private:
     // 底层 I2C 读写（私有）
-    void writeRegister(uint8_t regAddr, uint16_t value);
+    bool writeRegister(uint8_t regAddr, uint16_t value);
     uint16_t readRegister(uint8_t regAddr);
 };
 

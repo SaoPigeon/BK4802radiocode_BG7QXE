@@ -1,7 +1,8 @@
 // BK4802P 驱动程序 自主设计 编写者：SG  归属：CLG队伍
 // 此驱动程序是根据 BK4802P 的数据手册编写，因开源作者删库跑路，无奈只得自己写库
 // 起编日期：2026年3月24日
-// 修改日期：2026年4月16日 修改内容：频率计算改为kHz整数运算，避免浮点误差
+// 修改日期：2026年4月16日 修改内容：频率计算改为kHz整数运算，避免浮点误差（1.1）
+// 修改日期：2026年10月22日 修改内容：增加初始化失败返回，让上层知道芯片寄了（1.2）
 
 #include "BK4802P.h"
 #include <Wire.h>
@@ -16,14 +17,15 @@ BK4802P::BK4802P() {
     // 空实现，Wire 初始化由用户在 setup() 中完成
 }
 
-// 向 BK4802 指定寄存器写入 16 位数值
-void BK4802P::writeRegister(uint8_t regAddr, uint16_t value) {
+// 向 BK4802 指定寄存器写入 16 位数值（写入校验）
+bool BK4802P::writeRegister(uint8_t regAddr, uint16_t value) {
     Wire.beginTransmission(BK4802P_ADDR);
     Wire.write(regAddr);
     Wire.write(highByte(value));
     Wire.write(lowByte(value));
-    Wire.endTransmission();
+    uint8_t err = Wire.endTransmission();//检测I2C是否通讯异常
     delay(1);  // I2C 写入后短暂延时
+    return (err == 0);//返回值收到0才是正常，真他妈阴间
 }
 
 // 从 BK4802 指定寄存器读回 16 位数值
@@ -38,9 +40,25 @@ uint16_t BK4802P::readRegister(uint8_t regAddr) {
 }
 
 // 初始化寄存器
-void BK4802P::RegistersInit() {
-    writeRegister(23, 0x1CE0);  // 第一步初始化，先写 23 号寄存器！
-    // 这里原参考代码是 A8D0，我已修改寄存器 Reg23<10> 为 1，收发完全由寄存器控制
+bool BK4802P::RegistersInit() {
+    //这里是失败校验
+    // ---- 第一步：写 23 号寄存器（1.1原逻辑）----
+    if (!writeRegister(23, 0x1CE0)) {
+	// 这里原参考代码是 A8D0，我已修改寄存器 Reg23<10> 为 1，收发完全由寄存器控制
+        return false;   // 写操作没有 ACK，芯片不在或总线异常
+    }
+
+    // ---- 第二步：读 Reg27 芯片识别码，确认是 BK4802 ----
+    uint16_t chipId = readRegister(27);
+    if (chipId != 0x4802) {
+        return false;   // 识别码不对，不是目标芯片或通信异常
+    }
+
+    // ---- 第三步：回读 Reg23，确认刚才的写入生效 ----
+    if (readRegister(23) != 0x1CE0) {
+        return false;   // 写进去了但读回来不对，时序/电源问题
+    }
+    
 
     // 初始化寄存器数组（参照参考代码并基于数据手册修改，后续可改）
     const uint16_t initreg[] = {
@@ -69,6 +87,7 @@ void BK4802P::RegistersInit() {
     for (size_t i = 0; i < sizeof(initreg) / sizeof(initreg[0]); i++) {
         writeRegister(4 + i, initreg[i]);
     }
+    return true;
 }
 
 // 设置频率函数 // BK4802 支持的频率段有：24-32；35-46；43-57；128-170；384-512（MHz）
@@ -85,7 +104,7 @@ void BK4802P::BK4802FreqSet(uint32_t freq_khz, bool isTX) {
     } else if (freq_khz >= 43000UL && freq_khz <= 57000UL) {
         ndiv = 36;     // Band3
         div_code = 4;
-    } else if (freq_khz >= 35000UL && freq_khz <= 46000UL) {
+    } else if (freq_khz >= 35000UL && freq_khz <= 43000UL) {
         ndiv = 44;     // Band4
         div_code = 5;
     } else if (freq_khz >= 24000UL && freq_khz <= 32000UL) {
