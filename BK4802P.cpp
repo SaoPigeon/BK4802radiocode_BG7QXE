@@ -3,7 +3,7 @@
 // 起编日期：2026年3月24日
 // 修改日期：2026年4月16日 修改内容：频率计算改为kHz整数运算，避免浮点误差（1.1）
 // 修改日期：2026年10月22日 修改内容：增加初始化失败返回，让上层知道芯片寄了（1.2）
-
+// 修改日期：2026年10月23日 修改内容：改掉功率音量等函数在收发切换时候寄存器被覆盖掉的大bug，功能函数可以自由使用
 #include "BK4802P.h"
 #include <Wire.h>
 
@@ -14,7 +14,13 @@ static const double IF_KHZ = 137;        // 中频频率 (kHz)
 
 // 构造函数（无需操作，Wire.begin 需由用户自行调用）
 BK4802P::BK4802P() {
-    // 空实现，Wire 初始化由用户在 setup() 中完成
+    // 用户配置默认值（1.3新增）
+    _cfg.power    = 7;      // 功放功率
+    _cfg.volume   = 50;     // 默认中等音量，避免超过200降灵敏度
+    _cfg.easySQLState  = true;  // 默认静噪，否则主程序要先按一下按钮才能写入静噪进入寄存器
+    _cfg.tailTone = false;      // 默认开启尾音消除（不接受默认[]~(￣▽￣)~*）
+    // Wire 初始化由用户在 setup() 中完成
+    //cfg是configuration的缩写，意思是配置（四级没过是这样的）
 }
 
 // 向 BK4802 指定寄存器写入 16 位数值（写入校验）
@@ -149,42 +155,65 @@ void BK4802P::BK4802FreqSet(uint32_t freq_khz, bool isTX) {
 void BK4802P::BK4802RXModeSet() {
     writeRegister(4, 0x0300);   // 收发模式寄存器，此处为接收
     writeRegister(5, 0x0C04);   // 晶振，采样 ADC 寄存器
-    writeRegister(8, 0x1700);   // 功放功率（Reg8<5-7>已置零），ASK 开关（关），低电流模式（关）
+    writeRegister(8, 0x1700);   // 功放功率（Reg8<5-7>已置零）（接收模式改这个毫无意义），ASK 开关（关），低电流模式（关）
     writeRegister(15, 0x07A0);  // 发射限幅设置寄存器
     writeRegister(18, 0xD1D1);  // 开关喇叭延时设置
-    writeRegister(22, 0x0340);  // 静噪
-    writeRegister(23, 0x1CE0);  //数字部分工作在接收状态
+    uint16_t reg19 = readRegister(19);// 尾音消除：读-改-写 Reg19 bit10（1.3新增）
+    if (_cfg.tailTone) reg19 &= ~(1 << 10);  // 开启：bit10=0
+    else               reg19 |=  (1 << 10);  // 关闭：bit10=1
+    writeRegister(19, reg19);   // 写入寄存器
+    writeRegister(22, _cfg.easySQLState ? 0x0340 : 0x0C00);// 静噪：从 _cfg 动态选取（1.3新增）
+    writeRegister(23, 0x1CE0);  // 数字部分工作在接收状态
+
 }
 
 // 发射模式设置函数
 void BK4802P::BK4802TXModeSet() {
     writeRegister(4, 0x7C00);   // 收发模式寄存器，此处为发射
     writeRegister(5, 0x0004);   // 晶振，采样 ADC 寄存器
-    writeRegister(8, 0x3FE0);   // 功放功率
+    uint16_t reg8 = 0x3FE0;     // 功放功率：从 _cfg 动态组装 Reg8 bit5-7（1.3新增）
+    reg8 = (reg8 & ~(0x07 << 5)) | ((uint16_t)_cfg.power << 5);
+    writeRegister(8, reg8);     // 写入寄存器
     writeRegister(15, 0x061F);  // 发射限幅设置寄存器
     writeRegister(18, 0xD1C1);  // 开关喇叭延时设置
-    writeRegister(22, 0x0C00);  // 静噪
-    writeRegister(23, 0x1EE0);  //数字部分工作在发射状态
+    uint16_t reg19 = readRegister(19);// 尾音消除：读-改-写 Reg19 bit10（1.3新增）
+    if (_cfg.tailTone) reg19 &= ~(1 << 10);  // 开启：bit10=0
+    else               reg19 |=  (1 << 10);  // 关闭：bit10=1
+    writeRegister(19, reg19);   // 写入寄存器
+    writeRegister(22, _cfg.easySQLState ? 0x0340 : 0x0C00);// 静噪：从 _cfg 动态选取（1.3新增）
+    writeRegister(23, 0x1EE0);  // 数字部分工作在发射状态
+
+
 }
 
 // 发射功率设置函数 功率值 0-7（对应寄存器 Reg8<5-7>）
 void BK4802P::BK4802PwrSet(int level) {
-    if (level > 7) level = 7;                     // 超过最大值就设为 7
+    /*if (level > 7) level = 7;                     // 超过最大值就设为 7
     uint16_t reg8 = readRegister(8);              // 读取当前值，确保其他寄存器位不被覆盖
     reg8 = (reg8 & ~(0x07 << 5)) | (level << 5); // 用 ~(0x07 << 5) 清零 5-7，再写入新值
-    writeRegister(8, reg8);
+    writeRegister(8, reg8);（原来的注释掉，有bug可返回）*/
+    if (level > 7) level = 7;          // 超过最大值就设为 7
+    if (level < 0) level = 0;          // 防御负数
+    _cfg.power = (uint8_t)level;       // 只存配置，等 ModeSet 时统一刷入芯片（1.3修改）
 }
 
 // 喇叭音量设置函数 音量值 0-255（对应寄存器 Reg32<0-7>）（实测超过 200 会降低接收灵敏度？不过我还不确定）
 void BK4802P::BK4802VolSet(uint8_t volume) {
-    uint16_t reg32 = readRegister(32);        // 读取当前值
+    /*uint16_t reg32 = readRegister(32);        // 读取当前值
     reg32 |= (1 << 8);                        // 启用数字音量（bit8=1）
     reg32 = (reg32 & 0xFF00) | volume;        // 保留高 8 位，更新低 8 位（音量阈值）
-    writeRegister(32, reg32);
+    writeRegister(32, reg32);（原来的注释掉，有bug可返回）*/
     // 备注：麦克风音频增益不需刻意设置，保持默认值即可
     /*（原话）麦克风放大器的增益由寄存器 REG16<5:0> 控制。BK4802P 发射音频
       通路具有自动增益控制功能，因此该寄存器无需手动设置，系统会自动选
       择最佳增益。 */
+    if (volume > 200) volume = 200;    // 实测超过200可能降低接收灵敏度，限幅（1.3新增）
+    _cfg.volume = volume;              // 只存配置（1.3修改）
+    // 音量不参与收发模式切换，直接写入 Reg32 立即生效
+    uint16_t reg32 = readRegister(32);
+    reg32 |= (1 << 8);                 // 启用数字音量（bit8=1）
+    reg32 = (reg32 & 0xFF00) | _cfg.volume;
+    writeRegister(32, reg32);          // 好吧其实我就加了个输入限幅，没怎么改
 }
 
 // 获取 RSSI 值（0-127）（对应寄存器 Reg24<0-6>）
@@ -251,16 +280,18 @@ void BK4802P::BK4802SQNSet(uint8_t code) {
 
 // BK4802 简易静噪设置函数，0->不静噪，1->静噪
 void BK4802P::BK4802EasySQLSet(bool isSQL) {
-    if (isSQL) writeRegister(22, 0x0340); // 静噪
-    else writeRegister(22, 0x0c00);      // 不静噪
+    /*if (isSQL) writeRegister(22, 0x0340); // 静噪
+    else writeRegister(22, 0x0c00);      // 不静噪*/
+    _cfg.easySQLState = isSQL;   // 只存配置，等 ModeSet 时统一刷入 Reg22（1.3修改）
 }
 
 // 自动消尾音功能设置（对应寄存器 Reg19<10>）0->关闭，1->开启
 void BK4802P::BK4802AutoTailToneSet(bool enable) {
-    uint16_t reg19 = readRegister(19);      // 读取当前寄存器 19 的值
+    /*uint16_t reg19 = readRegister(19);      // 读取当前寄存器 19 的值
     if (enable) reg19 &= ~(1 << 10);        // 开启：bit10 = 0
     else  reg19 |= (1 << 10);               // 关闭：bit10 = 1
-    writeRegister(19, reg19);               // 写回芯片
+    writeRegister(19, reg19);               // 写回芯片*/
+    _cfg.tailTone = enable;   // 只存配置，等 ModeSet 时统一刷入 Reg19（1.3修改）
 }
 
 // 启用接收（调用时用这个）

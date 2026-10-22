@@ -3,7 +3,7 @@
 // 起编日期：2026年3月24日
 // 修改日期：2026年4月16日 修改内容：频率计算改为kHz整数运算，避免浮点误差（1.1）
 // 修改日期：2026年10月22日 修改内容：增加初始化失败返回，让上层知道芯片寄了（1.2）
-
+// 修改日期：2026年10月23日 修改内容：改掉功率音量等函数在收发切换时候寄存器被覆盖掉的大bug，功能函数可以自由使用
 #ifndef BK4802P_H
 #define BK4802P_H
 
@@ -50,6 +50,15 @@ public:
     void TX_BK4802(uint32_t freq);
 
 private:
+
+    // 用户配置结构体（1.3新增）
+    struct UserConfig {
+        uint8_t power;      // 发射功率 0-7
+        uint8_t volume;     // 音量 0-255（建议不超过200）
+        bool    easySQLState;    // 静噪开关：true=开启，false=关闭
+        bool    tailTone;   // 尾音消除：true=开启，false=关闭
+    } _cfg;//cfg是configuration的缩写，意思是配置（四级没过是这样的）
+
     // 底层 I2C 读写（私有）
     bool writeRegister(uint8_t regAddr, uint16_t value);
     uint16_t readRegister(uint8_t regAddr);
